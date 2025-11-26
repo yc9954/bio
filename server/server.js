@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { studies, getSampleData, getFileData } from './data/studies.js';
-import { searchNCBI, getNCBIStudyDetail } from './services/ncbi.js';
+import { searchNCBI, getNCBIStudyDetail, getNCBISamples } from './services/ncbi.js';
 
 const app = express();
 const PORT = 3001;
@@ -240,21 +240,15 @@ app.get('/api/studies/:id', async (req, res) => {
 // GET /api/studies/:id/samples - Get samples for a study
 app.get('/api/studies/:id/samples', async (req, res) => {
   try {
-    // Try to get study from NCBI first
-    let study = null;
+    // Fetch samples from NCBI
+    let samples = [];
     try {
-      study = await getNCBIStudyDetail(req.params.id, 'gds');
+      samples = await getNCBISamples(req.params.id);
     } catch (error) {
-      console.error('Error fetching study from NCBI:', error);
-    }
-    
-    if (!study) {
-      return res.status(404).json({ error: 'Study not found' });
+      console.error('Error fetching samples from NCBI:', error);
     }
 
-    // For now, return empty samples array
-    // In production, this would fetch actual sample data from NCBI
-    res.json({ samples: [] });
+    res.json({ samples });
   } catch (error) {
     console.error('Error fetching samples:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -286,7 +280,7 @@ app.get('/api/studies/:id/files', async (req, res) => {
 });
 
 // POST /api/assistant/chat - AI Assistant chat
-app.post('/api/assistant/chat', (req, res) => {
+app.post('/api/assistant/chat', async (req, res) => {
   try {
     const { message, contextStudy } = req.body;
 
