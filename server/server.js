@@ -3,10 +3,28 @@ import cors from 'cors';
 import { searchNCBI, getNCBIStudyDetail, getNCBISamples } from './services/ncbi.js';
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 app.use(express.json());
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'OK',
+    message: 'Bioinformatics Data Portal API',
+    version: '1.0.0',
+    endpoints: {
+      studies: '/api/studies',
+      studyDetail: '/api/studies/:id',
+      samples: '/api/studies/:id/samples',
+      files: '/api/studies/:id/files',
+      filters: '/api/filters/options',
+      assistant: '/api/assistant/chat',
+      recommendations: '/api/assistant/recommendations'
+    }
+  });
+});
 
 // Helper function to filter studies
 function filterStudies(studies, filters) {
