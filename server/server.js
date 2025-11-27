@@ -1,6 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import { studies, getSampleData, getFileData } from './data/studies.js';
 import { searchNCBI, getNCBIStudyDetail, getNCBISamples } from './services/ncbi.js';
 
 const app = express();
@@ -14,15 +13,15 @@ function filterStudies(studies, filters) {
   let filtered = [...studies];
 
   if (filters.organisms && filters.organisms.length > 0) {
-    filtered = filtered.filter(s => filters.organisms.includes(s.organism));
+    filtered = filtered.filter(s => s.organism && filters.organisms.includes(s.organism));
   }
 
   if (filters.expTypes && filters.expTypes.length > 0) {
-    filtered = filtered.filter(s => filters.expTypes.includes(s.expType));
+    filtered = filtered.filter(s => s.expType && filters.expTypes.includes(s.expType));
   }
 
   if (filters.platforms && filters.platforms.length > 0) {
-    filtered = filtered.filter(s => filters.platforms.includes(s.platform));
+    filtered = filtered.filter(s => s.platform && filters.platforms.includes(s.platform));
   }
 
   if (filters.yearRange && filters.yearRange.length === 2) {
@@ -32,45 +31,23 @@ function filterStudies(studies, filters) {
 
   if (filters.author) {
     const authorLower = filters.author.toLowerCase();
-    filtered = filtered.filter(s => 
-      s.submitter.toLowerCase().includes(authorLower) ||
-      s.authors.some(a => a.toLowerCase().includes(authorLower))
-    );
+    filtered = filtered.filter(s => {
+      const submitterMatch = s.submitter && s.submitter.toLowerCase().includes(authorLower);
+      const authorsMatch = s.authors && s.authors.some(a => a.toLowerCase().includes(authorLower));
+      return submitterMatch || authorsMatch;
+    });
   }
 
   if (filters.journal) {
     const journalLower = filters.journal.toLowerCase();
-    filtered = filtered.filter(s => 
-      s.journal.toLowerCase().includes(journalLower)
-    );
+    filtered = filtered.filter(s => s.journal && s.journal.toLowerCase().includes(journalLower));
   }
 
   if (filters.studyTypes && filters.studyTypes.length > 0) {
-    filtered = filtered.filter(s => filters.studyTypes.includes(s.studyType));
+    filtered = filtered.filter(s => s.studyType && filters.studyTypes.includes(s.studyType));
   }
 
   return filtered;
-}
-
-// Helper function to search studies
-function searchStudies(studies, query) {
-  if (!query || query.trim() === '') return studies;
-
-  const queryLower = query.toLowerCase();
-  return studies.filter(study => {
-    return (
-      study.id.toLowerCase().includes(queryLower) ||
-      study.title.toLowerCase().includes(queryLower) ||
-      study.abstract.toLowerCase().includes(queryLower) ||
-      study.organism.toLowerCase().includes(queryLower) ||
-      study.expType.toLowerCase().includes(queryLower) ||
-      study.disease?.toLowerCase().includes(queryLower) ||
-      study.tissue.toLowerCase().includes(queryLower) ||
-      study.submitter.toLowerCase().includes(queryLower) ||
-      study.journal.toLowerCase().includes(queryLower) ||
-      study.authors.some(a => a.toLowerCase().includes(queryLower))
-    );
-  });
 }
 
 // Helper function to sort studies
@@ -104,8 +81,7 @@ app.get('/api/studies', async (req, res) => {
       yearMax,
       author,
       journal,
-      studyTypes,
-      useNCBI = 'true' // Always use NCBI API - no local data
+      studyTypes
     } = req.query;
 
     let filtered = [];
@@ -206,30 +182,21 @@ app.get('/api/studies', async (req, res) => {
 // GET /api/studies/:id - Get study details
 app.get('/api/studies/:id', async (req, res) => {
   try {
-    const { useNCBI = 'true' } = req.query;
     let study = null;
-    
-    // Always try NCBI first
-    if (useNCBI === 'true') {
-      try {
-        study = await getNCBIStudyDetail(req.params.id, 'gds');
-      } catch (ncbiError) {
-        console.error('NCBI API error:', ncbiError);
-      }
+
+    try {
+      study = await getNCBIStudyDetail(req.params.id, 'gds');
+    } catch (ncbiError) {
+      console.error('NCBI API error:', ncbiError);
     }
-    
-    // If NCBI fails, don't fall back to local data
+
     if (!study) {
       return res.status(404).json({ error: 'Study not found' });
     }
 
-    // Similar studies would require additional NCBI API calls
-    // For now, return empty array since we don't have local data
-    const similarStudies = [];
-
     res.json({
       ...study,
-      similarStudies: similarStudies
+      similarStudies: []
     });
   } catch (error) {
     console.error('Error fetching study:', error);
@@ -258,20 +225,7 @@ app.get('/api/studies/:id/samples', async (req, res) => {
 // GET /api/studies/:id/files - Get files for a study
 app.get('/api/studies/:id/files', async (req, res) => {
   try {
-    // Try to get study from NCBI first
-    let study = null;
-    try {
-      study = await getNCBIStudyDetail(req.params.id, 'gds');
-    } catch (error) {
-      console.error('Error fetching study from NCBI:', error);
-    }
-    
-    if (!study) {
-      return res.status(404).json({ error: 'Study not found' });
-    }
-
-    // For now, return empty files array
-    // In production, this would fetch actual file data from NCBI
+    // Return empty files array - file data not available from NCBI E-utilities
     res.json({ files: [] });
   } catch (error) {
     console.error('Error fetching files:', error);
@@ -366,69 +320,55 @@ app.get('/api/assistant/recommendations', async (req, res) => {
   }
 });
 
-// POST /api/export - Export studies
-app.post('/api/export', (req, res) => {
-  try {
-    const { studyIds, columns, format = 'csv' } = req.body;
-
-    // If no studyIds provided, export all studies
-    const selectedStudies = studyIds && studyIds.length > 0
-      ? studies.filter(s => studyIds.includes(s.id))
-      : studies;
-    
-    if (format === 'json') {
-      const data = selectedStudies.map(study => {
-        const row = {};
-        columns.forEach(col => {
-          row[col] = study[col] || '';
-        });
-        return row;
-      });
-      
-      res.json({ data, format: 'json' });
-    } else {
-      // CSV format
-      const headers = columns.join(',');
-      const rows = selectedStudies.map(study => {
-        return columns.map(col => {
-          const value = study[col] || '';
-          // Escape commas and quotes in CSV
-          if (typeof value === 'string' && (value.includes(',') || value.includes('"'))) {
-            return `"${value.replace(/"/g, '""')}"`;
-          }
-          return value;
-        }).join(',');
-      });
-      
-      const csv = [headers, ...rows].join('\n');
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename=bioscope_export_${Date.now()}.csv`);
-      res.send(csv);
-    }
-  } catch (error) {
-    console.error('Error exporting studies:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
+// POST /api/export - Export studies (removed - client-side export only)
 
 // GET /api/filters/options - Get filter options
 app.get('/api/filters/options', (req, res) => {
   try {
-    const organisms = [...new Set(studies.map(s => s.organism))].sort();
-    const expTypes = [...new Set(studies.map(s => s.expType))].sort();
-    const platforms = [...new Set(studies.map(s => s.platform))].sort();
-    const years = [...new Set(studies.map(s => s.year))].sort((a, b) => b - a);
-    const studyTypes = [...new Set(studies.map(s => s.studyType))].sort();
-
+    // Return common filter options (can be extended based on NCBI data)
     res.json({
-      organisms,
-      expTypes,
-      platforms,
+      organisms: [
+        'Homo sapiens',
+        'Mus musculus',
+        'Rattus norvegicus',
+        'Drosophila melanogaster',
+        'Caenorhabditis elegans',
+        'Saccharomyces cerevisiae',
+        'Arabidopsis thaliana',
+        'Danio rerio',
+        'Escherichia coli'
+      ],
+      expTypes: [
+        'RNA-seq',
+        'scRNA-seq',
+        'ChIP-seq',
+        'ATAC-seq',
+        'WGS',
+        'Exome-seq',
+        'Methylation',
+        'Microarray',
+        'Proteomics',
+        'Metagenomics'
+      ],
+      platforms: [
+        'Illumina',
+        'Illumina HiSeq',
+        'Illumina NextSeq',
+        'Illumina NovaSeq',
+        'Illumina MiSeq',
+        'PacBio',
+        'Oxford Nanopore',
+        'Ion Torrent'
+      ],
       years: {
-        min: Math.min(...years),
-        max: Math.max(...years)
+        min: 2005,
+        max: new Date().getFullYear()
       },
-      studyTypes
+      studyTypes: [
+        'In vivo',
+        'In vitro',
+        'In silico'
+      ]
     });
   } catch (error) {
     console.error('Error fetching filter options:', error);
