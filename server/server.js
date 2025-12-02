@@ -1,6 +1,10 @@
 import express from 'express';
 import cors from 'cors';
+import dotenv from 'dotenv';
+import { gemini } from "./services/geminiClient.js";
 import { searchNCBI, getNCBIStudyDetail, getNCBISamples } from './services/ncbi.js';
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -102,10 +106,26 @@ app.get('/api/studies', async (req, res) => {
       studyTypes
     } = req.query;
 
+    let searchQuery = q?.trim();
+
+    // 자연어 쿼리 > Gemini
+    if (searchQuery && searchQuery.length > 3) {
+      try {
+        console.log("원본 쿼리:", searchQuery);
+        const enhanced = await enhanceQueryWithGemini(searchQuery);
+        if (enhanced && enhanced.trim() && enhanced !== searchQuery) {
+          searchQuery = enhanced;
+          console.log("Gemini 변환 쿼리:", searchQuery);
+        }
+      } catch (geminiError) {
+        console.warn("Gemini 변환 실패 → 원본 쿼리 사용:", geminiError.message);
+      }
+    }
+
     let filtered = [];
 
     // Always use NCBI API - require search query
-    if (!q || !q.trim()) {
+    if (!searchQuery) {
       return res.json({
         studies: [],
         total: 0,
@@ -123,13 +143,12 @@ app.get('/api/studies', async (req, res) => {
       for (const db of databases) {
         try {
           // Get more results for filtering (multiply by 5 to get enough data)
-          const ncbiResults = await searchNCBI(q, db, parseInt(limit) * 5);
+          const ncbiResults = await searchNCBI(searchQuery, db, parseInt(limit) * 5);
           if (ncbiResults.studies && ncbiResults.studies.length > 0) {
             allResults.push(...ncbiResults.studies);
           }
         } catch (dbError) {
           console.error(`NCBI API error for ${db}:`, dbError);
-          // Continue with other databases
         }
       }
 
@@ -146,7 +165,6 @@ app.get('/api/studies', async (req, res) => {
       filtered = uniqueResults;
     } catch (ncbiError) {
       console.error('NCBI API error:', ncbiError);
-      // Return empty results instead of local data
       return res.json({
         studies: [],
         total: 0,
@@ -154,7 +172,7 @@ app.get('/api/studies', async (req, res) => {
         limit: parseInt(limit),
         totalPages: 0
       });
-    }
+     }
 
     // Build filters object
     const filters = {};
@@ -254,87 +272,69 @@ app.get('/api/studies/:id/files', async (req, res) => {
 // POST /api/assistant/chat - AI Assistant chat
 app.post('/api/assistant/chat', async (req, res) => {
   try {
-    const { message, contextStudy } = req.body;
+    const { message, contextStudy } = req.body; // contextStudy is likely the ID (e.g., GSE12345)
 
-    if (!message) {
-      return res.status(400).json({ error: 'Message is required' });
+    if (!message?.trim()) {
+      return res.status(400).json({ error: '메시지를 입력해주세요.' });
     }
 
-    // Mock AI response (in production, this would call an actual LLM)
-    let response = "I'm here to help you understand studies and find relevant datasets. ";
+    let studyData = null;
 
+    // Fetch study data HERE, not inside the AI class
     if (contextStudy) {
-      // Try to get study from NCBI
       try {
-        const study = await getNCBIStudyDetail(contextStudy, 'gds');
-        if (study) {
-          response = `Based on the study ${study.id} (${study.title}), `;
-          
-          if (message.toLowerCase().includes('explain') || message.toLowerCase().includes('what')) {
-            response += `this study investigates ${study.disease || study.tissue} using ${study.expType}. `;
-            response += `The researchers analyzed ${study.samples} samples and found key insights about ${study.abstract.substring(0, 100)}...`;
-          } else if (message.toLowerCase().includes('findings') || message.toLowerCase().includes('key')) {
-            response += `key findings include significant changes in gene expression patterns related to ${study.disease || study.tissue}. `;
-            response += `The study used ${study.platform} platform and identified potential therapeutic targets.`;
-          } else if (message.toLowerCase().includes('similar') || message.toLowerCase().includes('related')) {
-            response += `I can help you find similar studies. Try searching for related terms in the search bar.`;
-          } else {
-            response += `this study focuses on ${study.abstract.substring(0, 150)}...`;
-          }
-        }
-      } catch (error) {
-        console.error('Error fetching study for assistant:', error);
-      }
-    } else {
-      if (message.toLowerCase().includes('breast cancer')) {
-        response += "I found several breast cancer studies. GSE123456 focuses on hypoxic conditions in breast cancer cell lines, while GSE9876 analyzes triple-negative breast cancer patient samples.";
-      } else if (message.toLowerCase().includes('rna-seq')) {
-        response += "There are multiple RNA-seq studies available. GSE123456 profiles breast cancer cell lines, GSE98765 uses single-cell RNA-seq for colorectal cancer, and GSE43210 analyzes C. elegans response to stress.";
-      } else if (message.toLowerCase().includes('similar') || message.toLowerCase().includes('suggest')) {
-        response += "Based on your search, I recommend checking out GSE123456 for breast cancer studies, GSE98765 for single-cell analysis, or GSE87654 for epigenetic studies.";
-      } else {
-        response += "I can help you search for studies, explain research findings, or suggest similar datasets. What would you like to know?";
+         // Assuming this function exists in your code
+         studyData = await getNCBIStudyDetail(contextStudy, 'gds'); 
+      } catch (err) {
+         console.warn("Failed to fetch context study for chat:", err.message);
+         // We continue without context rather than failing the chat
       }
     }
 
-    // Simulate some delay
-    setTimeout(() => {
-      res.json({ response });
-    }, 500);
+    // Pass the actual object, not the ID
+    const response = await gemini.chat(message, studyData);
+
+    res.json({ 
+      response: response.trim(),
+      model: "gemini-1.5-flash"
+    });
+
   } catch (error) {
-    console.error('Error in assistant chat:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('AI Chat Error:', error);
+    res.status(500).json({ 
+      error: 'AI 응답 생성 중 오류가 발생했습니다.',
+      details: error.message 
+    });
   }
 });
 
 // GET /api/assistant/recommendations - Get AI recommendations
 app.get('/api/assistant/recommendations', async (req, res) => {
   try {
-    const { studyId } = req.query;
-    
-    let recommendations = [];
-    
+    const { studyId, query } = req.query;
+    let contextStudy = null;
+
+    // 1. studyId가 있으면 DB/API에서 정보만 가져옴 (프롬프트 생성은 안 함)
     if (studyId) {
-      // Try to get similar studies from NCBI
-      // For now, return empty array - would need additional NCBI API calls
       try {
-        const study = await getNCBIStudyDetail(studyId, 'gds');
-        if (study) {
-          // Could search for similar studies based on keywords
-          // For now, return empty
-        }
-      } catch (error) {
-        console.error('Error fetching study for recommendations:', error);
+        contextStudy = await getNCBIStudyDetail(studyId, 'gds');
+      } catch (err) {
+        console.log(`Study ID ${studyId} not found, proceeding with query only.`);
       }
-    } else {
-      // General recommendations - would need to search NCBI
-      // For now, return empty array
     }
 
-    res.json({ recommendations });
+    // 2. Gemini에게 데이터(query, contextStudy)만 던짐
+    const result = await gemini.recommend({ query, contextStudy });
+
+    // 3. 결과 바로 반환
+    res.json(result);
+
   } catch (error) {
-    console.error('Error fetching recommendations:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Recommendation Controller Error:', error);
+    res.status(500).json({ 
+      error: '추천 정보를 가져오는 중 오류가 발생했습니다.',
+      recommendations: [] 
+    });
   }
 });
 
